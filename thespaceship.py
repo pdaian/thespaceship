@@ -862,6 +862,16 @@ def chat():
     if not session.get("name"):
         return redirect(url_for("index"))
 
+    # Seed an initial assistant greeting so the very first line in the
+    # log is part of the real conversation history and does not
+    # disappear once AJAX rendering takes over.
+    if not session["messages"]:
+        session["messages"].append({
+            "role": "assistant",
+            "content": "A low thrum rolls through the reactors as your link stabilizes. What brings you onto the bridge tonight, crewmate?",
+        })
+        save_conversation(session_id, session)
+
     remaining = max(0, MAX_USER_MESSAGES - session["user_count"])
 
     error = session.get("error")
@@ -1642,28 +1652,19 @@ CHAT_TEMPLATE = r"""
 
   <section class="chat-panel">
     <div class="log" id="log">
-      {% if not messages %}
-        <div class="msg msg-assistant">
-          <div class="msg-label msg-label-assistant">Ship Core</div>
-          <div>
-            A low thrum rolls through the reactors as your link stabilizes. What brings you onto the bridge tonight, crewmate?
+      {% for m in messages %}
+        {% if m.role == "user" %}
+          <div class="msg msg-user">
+            <div class="msg-label msg-label-user">You</div>
+            <div>{{ m.content }}</div>
           </div>
-        </div>
-      {% else %}
-        {% for m in messages %}
-          {% if m.role == "user" %}
-            <div class="msg msg-user">
-              <div class="msg-label msg-label-user">You</div>
-              <div>{{ m.content }}</div>
-            </div>
-          {% else %}
-            <div class="msg msg-assistant">
-              <div class="msg-label msg-label-assistant">Ship Core</div>
-              <div>{{ m.content }}</div>
-            </div>
-          {% endif %}
-        {% endfor %}
-      {% endif %}
+        {% else %}
+          <div class="msg msg-assistant">
+            <div class="msg-label msg-label-assistant">Ship Core</div>
+            <div>{{ m.content }}</div>
+          </div>
+        {% endif %}
+      {% endfor %}
     </div>
     <form class="input-bar" id="chat-form">
       <input id="chat-input" type="text" name="message" autocomplete="off" placeholder="Type your log entry here..." value="{{ last_input or '' }}">
@@ -1710,7 +1711,7 @@ CHAT_TEMPLATE = r"""
     const gain = ctx.createGain();
     osc.type = type || "sine";
     osc.frequency.value = freq;
-    gain.gain.value = volume ?? 0.08;
+    gain.gain.value = volume !== undefined ? volume : 0.08;
     osc.connect(gain);
     gain.connect(ctx.destination);
     const now = ctx.currentTime;
