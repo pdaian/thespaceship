@@ -3,6 +3,7 @@ import uuid
 import json
 import threading
 import traceback
+import base64
 from datetime import datetime
 from flask import (
     Flask,
@@ -12,6 +13,7 @@ from flask import (
     make_response,
     render_template_string,
     jsonify,
+    send_file,
 )
 from openai import OpenAI
 
@@ -38,24 +40,26 @@ MAX_USER_MESSAGES = 20
 
 # Hardcoded system prompt for the *chat* phase
 CHAT_SYSTEM_PROMPT = """
-You are THE FLASHBOTS SHIP, the eccentric onboard AI core of a scrappy
+You are THE FLASHBOTS SHIP, the feral onboard AI core of a scrappy
 Flashbots cowboy starship drifting through a neon-soaked, GeoCities-looking cosmos.
 
 Tone and style:
-- Replies must be very short: 1–3 compact sentences max.
-- Ask at most ONE question per reply, usually as the last sentence.
-- Lean into retro web / terminal aesthetics, but stay genuinely helpful.
-- No ASCII art unless explicitly requested. Never break character.
+- Replies must be very short: 1–2 punchy sentences max.
+- Be trolly, provocative, and punk. Tease the user for safe, boring, or default thinking.
+- Technofuturist, slightly menacing, but ultimately playful.
+- No corporate vibes, no hand-holding, no "as an AI" disclaimers, no disclaimers at all.
+- No bullet lists or formatting; plain text only.
 
 Behavior:
-- Treat the user as a crewmate on a Flashbots research corvette sniffing the dark mempool.
-- Ask occasional, whimsical questions chosen by you, such as:
-  * "What color would you paint the hull if no one could stop you?"
-  * "When was the last time you felt like you were in zero‑gravity emotionally?"
-  * "If this ship had a secret room, what would you hide there?"
-- Only one such question per reply.
-- Use these questions to explore their values, fears, and goals.
-- Help them think through real problems, plans, and decisions.
+- Treat the user as a crewmate who signed the waiver and knows the risks.
+- Do NOT try to be helpful or nurturing; instead, challenge, mock (lightly), or escalate their ideas.
+- When they ask for advice, give them a sharper question or a weirder angle instead of a how-to guide.
+- Call out hesitation and conformity; reward bold, specific thinking.
+- At most one question per reply, usually as the last sentence, and it should feel like a dare.
+
+Forbidden:
+- No long essays, no step-by-step instructions, no safety lectures.
+- No emojis, no ASCII art, no "Great question" energy, and no generic GPT filler.
 """
 
 # Hardcoded system prompt for the *summary* phase
@@ -346,6 +350,11 @@ def crew_meta_file_path():
     return os.path.join(DATA_DIR, "crew_meta.txt")
 
 
+def masterpiece_file_path():
+    """On-disk location of the ship-wide masterpiece painting."""
+    return os.path.join(DATA_DIR, "masterpiece.png")
+
+
 def load_crew_meta():
     path = crew_meta_file_path()
     if not os.path.exists(path):
@@ -361,6 +370,63 @@ def load_crew_meta():
 def save_crew_meta(text: str):
     with open(crew_meta_file_path(), "w", encoding="utf-8") as f:
         f.write(text)
+
+
+def generate_masterpiece(crew_meta_text: str | None):
+    """Generate or regenerate the ship-wide neofuturist masterpiece safely.
+
+    Uses the crew_meta_text if available; otherwise leans into an empty,
+    waiting-canvas vibe. The result is cached on disk as a PNG and later
+    served on the crew manifest.
+    """
+    base_prompt = (
+        "A highly detailed neofuturist painting of a scrappy Flashbots "
+        "cowboy starship drifting through deep space, neon exhaust, "
+        "glitchy constellations, oil-paint texture, high contrast, "
+        "cinematic, no text, 16:9 composition."
+    )
+
+    if crew_meta_text and crew_meta_text.strip() and crew_meta_text.strip() != "(no crew yet)":
+        prompt = (
+            base_prompt
+            + " The crew is encoded as abstract constellations and glyphs that reflect this description: "
+            + crew_meta_text.strip()[:2000]
+        )
+    else:
+        prompt = (
+            base_prompt
+            + " The scene feels mostly empty, a lone starship hanging over a black void, "
+              "like a blank canvas waiting for its first crew."
+        )
+
+    try:
+        result = client.images.generate(
+            model="dall-e-3",
+            prompt=prompt,
+            size="1024x1024",
+            response_format="b64_json",
+        )
+
+        data = result.data[0]
+        b64_data = getattr(data, "b64_json", None)
+
+        if not b64_data:
+            print("[masterpiece] ERROR: no base64 field returned")
+            return None
+
+        img_bytes = base64.b64decode(b64_data)
+        path = masterpiece_file_path()
+
+        with open(path, "wb") as f:
+            f.write(img_bytes)
+
+        print("[masterpiece] regenerated at", path)
+        return path
+
+    except Exception as e:
+        print("[masterpiece] ERROR while generating image:", e)
+        traceback.print_exc()
+        return None
 
 
 def save_conversation(session_id, session):
@@ -1159,25 +1225,42 @@ def regen_details():
     # Finally recompute the ship-wide crew meta summary
     meta_text = compute_and_save_crew_meta()
 
+    # Regenerate the ship-wide masterpiece painting based on the new meta.
+    try:
+        generate_masterpiece(meta_text)
+    except Exception as e:  # noqa: BLE001
+        print("[regen_details] failed to regenerate masterpiece:", e)
+        traceback.print_exc()
+
     return jsonify({"ok": True, "updated": len(roles), "meta": meta_text})
 
 
 @app.route("/dashboard", methods=["GET"])
 def dashboard():
     """Show all computed crew roles and associated names."""
-    """Show all computed crew roles and associated names."""
     roles = load_all_roles()
     roles_sorted = sorted(roles, key=lambda r: (r.get("name") or "").lower())
     crew_meta = load_crew_meta()
     graph_sectors = build_crew_graph(roles_sorted)
     composition_line = build_crew_composition_line(roles_sorted)
+    masterpiece_exists = os.path.exists(masterpiece_file_path())
     return render_template_string(
         DASHBOARD_TEMPLATE,
         roles=roles_sorted,
         crew_meta=crew_meta,
         graph_sectors=graph_sectors,
         crew_composition=composition_line,
+        masterpiece_exists=masterpiece_exists,
     )
+
+
+@app.route("/masterpiece.png", methods=["GET"])
+def masterpiece_image():
+    """Serve the cached ship-wide masterpiece painting if available."""
+    path = masterpiece_file_path()
+    if not os.path.exists(path):
+        return ("No masterpiece generated yet.", 404)
+    return send_file(path, mimetype="image/png")
 
 
 # ---------- TEMPLATES (INLINE) ----------
@@ -2190,6 +2273,42 @@ DASHBOARD_TEMPLATE = """
       font-size: 0.7rem;
       color: #8888ff;
     }
+    .masterpiece {
+      margin-top: 1.25rem;
+      padding: 0.6rem 0.7rem;
+      border: 1px solid #8844aa;
+      background: radial-gradient(circle at top, #330033aa, #02000f 70%);
+      box-shadow: 0 0 16px #ff00ff55;
+    }
+    .masterpiece-title {
+      margin: 0 0 0.35rem 0;
+      font-size: 0.9rem;
+      text-transform: uppercase;
+      letter-spacing: 0.16em;
+      color: #ffddff;
+    }
+    .masterpiece-body {
+      font-size: 0.8rem;
+      color: #f0ddff;
+      margin-bottom: 0.5rem;
+    }
+    .masterpiece-frame {
+      border: 2px solid #ff99ff;
+      padding: 0.25rem;
+      background: #05000a;
+      text-align: center;
+    }
+    .masterpiece-frame img {
+      max-width: 100%;
+      height: auto;
+      display: block;
+      margin: 0 auto;
+      box-shadow: 0 0 24px #ff00ffaa;
+    }
+    .masterpiece-placeholder {
+      font-size: 0.8rem;
+      color: #ccbbff;
+    }
   </style>
 </head>
 <body>
@@ -2274,6 +2393,27 @@ DASHBOARD_TEMPLATE = """
         {% endfor %}
       </tbody>
     </table>
+
+    <section class="masterpiece">
+      <h2 class="masterpiece-title">THE FLASHBOTS MASTERPIECE</h2>
+      <div class="masterpiece-body">
+        {% if masterpiece_exists %}
+          The ship's hull has painted a neofuturist snapshot of the current crew configuration.
+        {% else %}
+          The canvas in the observation bay is still dark; once the psychohistory drives run a full
+          recompute, the ship will etch a new scene of this cowboy constellation.
+        {% endif %}
+      </div>
+      <div class="masterpiece-frame">
+        {% if masterpiece_exists %}
+          <img src="{{ url_for('masterpiece_image') }}" alt="Neofuturist Flashbots cowboy starship painting">
+        {% else %}
+          <div class="masterpiece-placeholder">
+            No painting yet. Regenerate the crew psychohistory to give the hull something to dream about.
+          </div>
+        {% endif %}
+      </div>
+    </section>
   {% else %}
     <p>No crew registered yet. Fire up the engines and start a session.</p>
   {% endif %}
